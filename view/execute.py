@@ -1,5 +1,4 @@
 from json import JSONDecodeError
-from typing import List, Union
 import ujson
 
 from uc_flow_nodes.schemas import NodeRunContext
@@ -7,8 +6,7 @@ from uc_flow_nodes.views import execute
 from uc_flow_schemas.flow import RunState
 from uc_http_requester.requester import Request
 
-from .info import InfoView
-from schemas.enums import Option, Operation
+from schemas.enums import DISK_URL, Operation
 
 
 def get_attr(params, attr):
@@ -28,58 +26,52 @@ class ExecuteView(execute.Execute):
     async def post(self, json: NodeRunContext) -> NodeRunContext:
         try:
             properties = json.node.data.properties
-            option = properties['option']
-            if option == Option.authorization:
-                hostname = properties['hostname']
-                branch = properties['branch']
-                email = properties['email']
-                api_key = properties['api_key']
-                url = f'https://{hostname}/v2api/auth/login'
-                data = {'email': email, 'api_key': api_key}
+            token = properties['token']
+            headers = {
+                'Accept': 'application/json',
+                'Content-Type': 'application/json',
+                'Authorization': f'OAuth {token}'
+            }
+            if properties['operation'] == Operation.get_all_files:
+                parameters = get_request_params(properties['parameters'])
                 request = Request(
-                    url=url,
-                    json=data,
-                    method=Request.Method.post,
-                )
-                result = await request.execute()
-                result_data = result.json()
-                await json.save_result({
-                    "token": result_data['token'],
-                    "branch": branch,
-                    "hostname": hostname
-                })
-                json.state = RunState.complete
-            if option == Option.resource:
-                token = json.node.data.properties['auth_result']['token']
-                branch = properties['auth_result']['branch']
-                hostname = properties['auth_result']['hostname']
-                headers = {
-                    'Accept': 'application/json',
-                    'Content-Type': 'application/json',
-                    'X-ALFACRM-TOKEN': token
-                }
-                parameters = json.node.data.properties['parameters']
-                parameters = get_request_params(parameters)
-                if parameters.get('is_study') is not None:
-                    parameters['is_study'] = int(parameters['is_study'])
-                operation = properties['operation']
-                if operation == Operation.update:
-                    id = properties['user_id']
-                    url = f'https://{hostname}/v2api/{branch}/customer/{operation}?id={id}'
-                else:
-                    url = f'https://{hostname}/v2api/{branch}/customer/{operation}'
-                request = Request(
-                    url=url,
-                    json=parameters,
-                    method=Request.Method.post,
-                    headers=headers
+                    url=f'{DISK_URL}files',
+                    params=parameters,
+                    method=Request.Method.get,
+                    headers=headers,
                 )
                 result = await request.execute()
                 await json.save_result({
                     'result': result.json()
                 })
                 json.state = RunState.complete
-                
+            if properties['operation'] == Operation.upload:
+                upload_path = properties['upload_file'][0].get('name')
+                upload_request = Request(
+                    url=f'{DISK_URL}upload',
+                    params={'path': upload_path},
+                    headers=headers
+                )
+                upload_request = await upload_request.execute()
+                upload_request = upload_request.json()
+                upload_url = upload_request['href']
+                file_path = properties['upload_file'][0].get('path')
+                file_content = Request(
+                    url=file_path,
+                    method=Request.Method.get,
+                )
+                file_content = await file_content.execute()
+                file_content = file_content.text
+                upload = Request(
+                    url=upload_url,
+                    method=Request.Method.put,
+                    data=file_content
+                )
+                await upload.execute()
+                await json.save_result({
+                    'result': 'Файл успешно загружен'
+                })
+                json.state = RunState.complete
         except Exception as e:
             self.log.warning(f'Error {e}')
             await json.save_error(str(e))
